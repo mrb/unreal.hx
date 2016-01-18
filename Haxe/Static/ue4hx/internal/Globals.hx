@@ -148,6 +148,11 @@ class Globals {
    **/
   public var delays:Lst<Void->Void>;
 
+  /**
+    Cache for TypeKinds
+   **/
+  public var typeKindCache:Map<String, TypeConv.TypeKind> = new Map();
+
   public var toDefineTParams:Map<String, TypeDefinition> = new Map();
   public var gluesTouched:Map<String,Bool> = new Map();
   public var canCreateTypes:Bool;

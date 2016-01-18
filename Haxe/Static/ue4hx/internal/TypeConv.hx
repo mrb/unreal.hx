@@ -1156,3 +1156,308 @@ abstract ForwardDecl(ForwardDeclEnum) from ForwardDeclEnum to ForwardDeclEnum {
     return this == null || this == Never;
   }
 }
+
+/**
+  Represents a Haxe type whose glue code will be generated. Contains all the information
+  on how to generate the glue code for the type
+
+  @see TypeConvInfo
+ **/
+@:forward abstract TConv(Modifier) from Modifier to Modifier {
+  inline public function new(mod) {
+    this = mod;
+  }
+
+  inline function underlying() {
+    return this;
+  }
+
+  private static function infoFromBaseType(baseType:BaseType, pos:Position):TConvInfo {
+    var ueType = it.meta.has(':uname') ? MacroHelpers.extactStrings(it.meta, ':uname')[0] : it.name;
+    var glueHeader = null;
+    if (it.meta.has(':glueHeaderIncludes')) {
+      glueHeader = IncludeSet.fromUniqueArray( MacroHelpers.extractStrings(it.meta, ':glueHeaderIncludes') );
+    }
+    var glueCpp = null;
+    if (it.meta.has(':glueCppIncludes')) {
+      glueCpp = IncludeSet.fromUniqueArray( MacroHelpers.extractString(it.meta, ':glueCppIncludes') );
+    }
+
+    return {
+      baseHaxeType: TypeRef.fromBaseTypeNoParams(baseType, pos),
+      baseUeType: TypeRef.parseClassName(ueType),
+      glueHeaderIncludes: glueHeader,
+      glueCppIncludes: glueCpp,
+    };
+  }
+
+  private static function typeIsUObject(t:Type) {
+    var uobject = Globals.cur.uobject;
+    if (uobject == null) {
+      Globals.cur.uobject = uobject = Context.getType('unreal.UObject');
+    }
+    return Context.unify(t, uobject);
+  }
+
+  private static function fromType(type:Type, pos:Position):Modifier {
+    var originalType = null;
+    var typeCache = Globals.cur.typeKindCache;
+    while(true) {
+      switch(type) {
+      case TInst(iref,tl):
+        var name = iref.toString();
+        if (tl.length == 0 && typeCache.exists(name)) {
+          return MType(typeCache[name], originalType);
+        }
+
+        var it = iref.get();
+        if (it.kind.match(KTypeParameter(_))) {
+          return MType(TTypeParam(it.name), originalType);
+        }
+
+        var info = infoFromBaseType(it, pos),
+            ret = null;
+        if (it.isInterface) {
+          ret = TInterface(info);
+        } else if(typeIsUObject(type)) {
+          // uobject derived
+          if (it.meta.has(':uextern')) {
+            ret = TUObject(UExtern, info);
+          } else if (it.meta.has(':uscript')) {
+            ret = TUObject(ScriptDeclared, info);
+          } else {
+            ret = TUObject(HaxeDeclared, info);
+          }
+        } else {
+          // ustruct
+          var params = [ for (t in tl) fromType(t, pos) ];
+          if (it.meta.has(':uextern')) {
+            ret = TStruct(UExtern, info, params);
+          } else if (it.meta.has(':uscript')) {
+            ret = TStruct(ScriptDeclared, info, params);
+          } else {
+            ret = TStruct(HaxeDeclared, info, params);
+          }
+        }
+
+        if (tl.length == 0) {
+          typeCache[name] = ret;
+        }
+        return MType(ret, originalType);
+
+      case TEnum(eref,tl):
+        var name = eref.toString();
+        if (typeCache.exists(name)) {
+          return MType(typeCache[name], originalType);
+        }
+
+        var e = eref.get();
+        if (tl.length == 0 || e.meta.has(':flatEnum')) {
+          throw new Error('Unreal Glue: Type cannot be a complex enum. Only flat enums without type parameters are supported (got $name)', pos);
+        }
+
+        var info = infoFromBaseType(e, pos),
+            ret = null;
+        if (e.meta.has(':uextern')) {
+          ret = TEnum(UExtern, info);
+        } else if (e.meta.has(':uscript')) {
+          ret = TEnum(ScriptDeclared, info);
+        } else {
+          ret = TEnum(HaxeDeclared, info);
+        }
+        typeCache[name] = ret;
+        return MType(ret, originalType);
+
+      case TAbstract(aref,tl):
+        var name = aref.toString();
+        var at = aref.get();
+        if (typeCache.exists(name)) {
+          return MType(typeCache[name], originalType);
+        }
+        if (at.meta.has(':enum')) {
+          var info = infoFromBaseType(e, pos);
+          var underlying = switch(fromType(at.type, pos)) {
+            case MType(TBasic(b), _):
+              b;
+            case _:
+              throw new Error('Unreal Glue: @:enum abstract\'s underlying type must be a basic type (for type $name)', pos);
+          };
+          var ret = TAbstractEnum(underlying, info);
+          typeCache[name] = ret;
+          return MType(ret, originalType);
+        } else if (at.meta.has(':coreType') || at.meta.has(':unrealType')) {
+          switch(name) {
+          case 'unreal.PStruct':
+            return MStruct(fromType(tl[0], pos));
+          case 'unreal.PRef':
+            return MRef(fromType(tl[0], pos));
+          case 'unreal.PHaxeCreated':
+            return MHaxeOwned(fromType(tl[0], pos));
+          case 'unreal.TSharedPtr':
+            return MSharedPtr(false, fromType(tl[0], pos));
+          case 'unreal.TSharedRef':
+            return MSharedRef(false, fromType(tl[0], pos));
+          case 'unreal.TWeakPtr':
+            return MWeakPtr(false, fromType(tl[0], pos));
+          case 'unreal.TThreadSafeSharedPtr':
+            return MSharedPtr(true, fromType(tl[0], pos));
+          case 'unreal.TThreadSafeSharedRef':
+            return MSharedRef(true, fromType(tl[0], pos));
+          case 'unreal.TThreadSafeWeakPtr':
+            return MWeakPtr(true, fromType(tl[0], pos));
+
+          // basic type
+          }
+        }
+        if (originalType == null)
+          originalType = TypeRef.fromType(type, pos);
+        // follow it
+#if (haxe_ver >= 3.3)
+        // this is more robust than the 3.2 version, since it will also correctly
+        // follow @:multiType abstracts
+        type = type.followWithAbstracts(true);
+#else
+        type = at.type.applyTypeParameters(at.params, tl);
+#end
+
+      case TType(tref,tl):
+        var t = tref.get();
+        if (t.meta.has(':unrealType'))
+        {
+          return {
+            name: tref.toString(),
+            args: tl,
+            meta: t.meta,
+
+            isBasic: true,
+            originalType: originalType
+          }
+        }
+        type = type.follow(true);
+      case TMono(mono):
+        type = mono.get();
+        if (type == null) {
+          throw 'assert';
+          throw new Error('Unreal Glue: Type cannot be Unknown', pos);
+        }
+      case TLazy(f):
+        type = f();
+      case TFun(_):
+        return {
+          name: "function",
+          args: [],
+          meta: null,
+          isFunction: true,
+          isBasic : false,
+          originalType : originalType
+        };
+      case _:
+        throw new Error('Unreal Glue: Invalid type $type', pos);
+      }
+    }
+  }
+}
+
+typedef TConvInfo = {
+  /**
+    Represents the Haxe-side type. Warning that it's the base type, and has no type parameters
+    applied
+   **/
+  public var baseHaxeType:TypeRef;
+  /**
+    Represents the base UE-side type. It's the base type, and has no pointer type applied to it
+   **/
+  public var baseUeType:TypeRef;
+
+  /**
+    Represents the public includes that can be included in the glue header
+    These can only be includes that are safe to be included in both UE4 and hxcpp sides
+   **/
+  @:optional public var glueHeaderIncludes:Null<IncludeSet>;
+  /**
+    Represents the private includes to the glue cpp files. These can be UE4 includes,
+    since the CPP file is only compiled by the UE4 side
+   **/
+  @:optional public var glueCppIncludes:Null<IncludeSet>;
+}
+
+enum DeclaredKind {
+  /**
+    Type was declared in C++ and is external
+   **/
+  UExtern;
+  /**
+    Type was declared in Haxe (UExtension or UStruct, etc)
+   **/
+  HaxeDeclared;
+  /**
+    Type was declared in Haxe as a script
+   **/
+  ScriptDeclared;
+}
+
+enum BasicType {
+  BInt64;
+  BUInt64;
+  BInt32;
+  BUInt32;
+  BInt16;
+  BUInt16;
+  BInt8;
+  BUInt8;
+
+  BFloat32;
+  BFloat64;
+
+  BBool;
+  BVoid;
+}
+
+enum TypeKind {
+  TBasic(b:BasicType);
+  TEnum(declared:DeclaredKind, info:TConvInfo);
+  TAbstractEnum(undelying:BasicType, info:TConvInfo);
+  TUObject(declared:DeclaredKind, info:TConvInfo);
+  TInterface(info:TConvInfo);
+  TStruct(declared:DeclaredKind, info:TConvInfo, params:Array<TypeConv>);
+  TFunction(args:Array<TypeConv>, ret:TypeConv);
+  TMethodPointer(cls:TypeKind, args:Array<TypeConv>, ret:TypeConv);
+  TTypeParam(name:String);
+}
+
+enum Modifier {
+  /**
+    The type itself. `OriginalType` is defined if the type was under abstract / typedef types
+   **/
+  MType(t:TypeKind, ?originalType:TypeRef);
+
+  /**
+    PStruct type. This can be omitted and is the default for structs
+   **/
+  MStruct(mod:Modifier);
+  /**
+    PRef type. It's a reference (either Struct& or UObject *&)
+   **/
+  MRef(mod:Modifier);
+  /**
+    External pointer type. Only really applied to structs
+   **/
+  MExternal(mod:Modifier);
+  /**
+    Pointer type which is owned by Haxe
+   **/
+  MHaxeOwned(mod:Modifier);
+
+  /**
+    TSharedPtr - only applied to struct types
+   **/
+  MSharedPtr(threadSafe:Bool, mod:Modifier);
+  /**
+    TSharedRef - only applied to struct types
+   **/
+  MSharedRef(threadSafe:Bool, mod:Modifier);
+  /**
+    TWeakPtr - only applied to struct types
+   **/
+  MWeakPtr(threadSafe:Bool, mod:Modifier);
+}

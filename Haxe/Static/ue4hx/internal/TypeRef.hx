@@ -97,6 +97,23 @@ class TypeRef
       return new TypeRef(ct.pack, ct.name, params);
   }
 
+  /**
+    Creates a typeref from a `BaseType`, ignoring the type parameters. This is useful when the target type is still
+    incomplete
+   **/
+  public static function fromBaseTypeNoParms(ct:BaseType, pos:Position):TypeRef {
+    var mod = ct.module;
+    var idx = mod.lastIndexOf('.');
+    if (idx >= 0) {
+      mod = mod.substr(idx+1);
+    }
+    if (mod != ct.name) {
+      return new TypeRef(ct.pack, ct.name, mod);
+    } else {
+      return new TypeRef(ct.pack, ct.name);
+    }
+  }
+
   public static function fromType(t:Type, pos:Position):TypeRef {
     while (true) {
       var base:BaseType = null,
